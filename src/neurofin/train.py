@@ -105,7 +105,11 @@ def main() -> None:
     spatial_shape: tuple[int, int, int] | None = None
 
     for run in tqdm(runs, desc="Processing runs"):
-        timings = load_word_timings(run.textgrid_path)
+        try:
+            timings = load_word_timings(run.textgrid_path)
+        except Exception as e:
+            tqdm.write(f"Warning: skipping {run.task} ({run.textgrid_path.name}): {e}")
+            continue
         words = [x.word for x in timings]
         word_times = np.array([x.start for x in timings], dtype=np.float32)
         if len(words) == 0:
