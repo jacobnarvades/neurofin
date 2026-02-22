@@ -19,7 +19,7 @@ class WordTiming:
 def load_word_timings(textgrid_path: Path, tier_name: str | None = None) -> list[WordTiming]:
     try:
         tg = textgrid.openTextgrid(str(textgrid_path), includeEmptyIntervals=False)
-    except TextgridStateError as original_error:
+    except (TextgridStateError, ValueError) as original_error:
         fixed_content = _repair_textgrid_interval_boundaries(textgrid_path)
         tmp_path: str | None = None
         try:
@@ -71,7 +71,7 @@ def _repair_textgrid_interval_boundaries(textgrid_path: Path) -> str:
     Normalize TextGrid numeric precision and snap interval starts to previous
     interval ends to fix tiny floating-point overlaps between adjacent intervals.
     """
-    lines = textgrid_path.read_text(encoding="utf-8").splitlines()
+    lines = textgrid_path.read_text(encoding="utf-8-sig").splitlines()
     out: list[str] = []
 
     number_line = re.compile(r"^(\s*)(xmin|xmax)\s*=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*$")
