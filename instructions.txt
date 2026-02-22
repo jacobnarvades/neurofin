@@ -1,0 +1,422 @@
+---
+
+**Project: Neural-Inspired Trading Signal — Weight Matrix Training Pipeline**
+
+**Goal for this session:** Build the complete architecture to train a voxelwise brain encoding model weight matrix using the HuthLab Narratives dataset and LLaMA 3, then save it for inference on Reddit comments.
+
+---
+
+**What you're building and why**
+
+This is the first stage of a trading signal pipeline. The core idea: Reddit comments are fed through a pretrained LLM, the hidden states are projected through a weight matrix trained on fMRI data, producing predicted brain activation vectors per comment. These predicted activations — specifically from reward (NAcc/ventral striatum), executive function (dlPFC), and default mode network regions — serve as features for return prediction.
+
+The weight matrix is trained once on neuroscience data (Narratives dataset) and then used purely for inference. No fMRI data is needed at inference time. The matrix is a linear mapping: LLM hidden states → predicted BOLD signal per voxel.
+
+The theoretical grounding: a 2024 PNAS paper (van Brussel et al.) showed NAcc activation of professional investors reading stock information predicted 1-year returns at 68% accuracy out-of-sample, beating both stock metrics and explicit predictions. You're approximating that implicit neural signal at scale from Reddit text.
+
+---
+
+**Architecture overview**
+
+```
+Reddit comment
+      ↓
+LLaMA 3 8B (middle layers ~16-22 of 32)
+      ↓
+Hidden states: shape (n_tokens, 4096)
+      ↓
+Mean pool → (4096,) per sentence/comment
+      ↓
+Lanczos interpolation to TR timescale (during training)
+HRF convolution with FIR delays [1,2,3,4]
+      ↓
+Banded ridge regression
+      ↓
+Weight matrix: (4096 × 4_delays) → 70,000 voxels
+      ↓
+PCA compression: 70,000 → 1000 Schaefer parcels
+      ↓
+ROI aggregation: 1000 parcels → ~20 functional ROIs
+      ↓
+Feature vector per comment: (20,)
+```
+
+---
+
+**Training data: HuthLab Narratives Dataset**
+
+- OpenNeuro accession: ds003020
+- 8 subjects, 27 stories (Moth Radio Hour podcasts)
+- ~6 hours of fMRI per subject
+- TR = 1.5s (check dataset, may vary by story)
+- Already preprocessed: cortical surface projections provided
+- TextGrids (word-level timestamps) provided for each story
+- Download via: `aws s3 sync --no-sign-request s3://openneuro.org/ds003020 ds003020/`
+- Size: ~50GB, download only the preprocessed derivatives not raw BOLD if space is tight
+- GitHub: https://github.com/HuthLab/deep-fMRI-dataset
+
+---
+
+**Key reference implementation**
+
+HuthLab encoding model scaling laws repo:
+https://github.com/HuthLab/encoding-model-scaling-laws
+
+This repo contains:
+- Feature extraction pipeline (originally for GPT/OPT, adaptable to LLaMA)
+- Lanczos interpolation + HRF convolution utilities
+- Banded ridge regression implementation
+- Evaluation (correlation between predicted and actual BOLD)
+
+Read this repo carefully before writing any new code. Adapt rather than rewrite.
+
+---
+
+**Step by step implementation**
+
+**Step 1: Environment setup**
+
+```bash
+pip install torch transformers datasets numpy scipy scikit-learn \
+    nibabel nilearn h5py matplotlib tqdm
+pip install git+https://github.com/HuthLab/encoding-model-scaling-laws
+# or clone and install manually
+git clone https://github.com/HuthLab/encoding-model-scaling-laws
+cd encoding-model-scaling-laws && pip install -e .
+```
+
+For LLaMA on Mac (CPU/Metal):
+```bash
+pip install llama-cpp-python  # CPU
+CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python  # M-series Metal
+```
+
+For LLaMA on GPU (PC):
+```bash
+pip install transformers accelerate bitsandbytes
+```
+
+---
+
+**Step 2: Download and inspect Narratives dataset**
+
+```bash
+# Install AWS CLI if needed
+pip install awscli
+
+# Download preprocessed derivatives only (~15GB vs 50GB full)
+aws s3 sync --no-sign-request \
+    s3://openneuro.org/ds003020/derivatives/preprocessed \
+    ds003020/derivatives/preprocessed
+
+# Download TextGrids (word timestamps)
+aws s3 sync --no-sign-request \
+    s3://openneuro.org/ds003020/stimuli \
+    ds003020/stimuli
+```
+
+Expected structure:
+```
+ds003020/
+  stimuli/
+    *.TextGrid          # word-level timestamps per story
+    *.wav               # audio (optional, not needed)
+  derivatives/
+    preprocessed/
+      sub-*/
+        func/
+          sub-*_task-*_bold.nii.gz  # preprocessed BOLD
+```
+
+Verify TR and shape of one BOLD file before proceeding:
+```python
+import nibabel as nib
+img = nib.load('path/to/bold.nii.gz')
+print(img.shape)  # (x, y, z, n_timepoints)
+print(img.header.get_zooms())  # last value is TR
+```
+
+---
+
+**Step 3: Extract LLaMA hidden states from story transcripts**
+
+```python
+from transformers import AutoTokenizer, AutoModel
+import torch
+import numpy as np
+
+def extract_hidden_states(
+    text: str,
+    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    layers: list = list(range(16, 23)),  # middle layers
+    device: str = "cuda"
+) -> np.ndarray:
+    """
+    Extract per-word hidden states from specified layers.
+    Returns shape: (n_words, n_layers, hidden_dim)
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(
+        model_name,
+        output_hidden_states=True,
+        torch_dtype=torch.float16,
+        device_map=device
+    )
+    model.eval()
+
+    inputs = tokenizer(text, return_tensors="pt",
+                      return_offsets_mapping=True).to(device)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # hidden_states: tuple of (n_layers+1, batch, seq_len, hidden_dim)
+    hidden_states = torch.stack(outputs.hidden_states, dim=0)
+    # Select target layers: (n_target_layers, seq_len, hidden_dim)
+    selected = hidden_states[layers]
+    
+    # Align to words via offset mapping
+    # (implementation depends on tokenizer — see HuthLab repo for reference)
+    word_features = align_tokens_to_words(
+        selected, inputs['offset_mapping'], text
+    )
+    
+    return word_features.cpu().numpy()
+    # shape: (n_words, n_layers, 4096)
+```
+
+Critical: you need word-level (not token-level) features because the TextGrids give word timestamps. The HuthLab repo has utilities for this alignment — use them.
+
+---
+
+**Step 4: Temporal alignment (Lanczos + HRF)**
+
+This is the most important step and the one most people get wrong. The fMRI TR is ~1.5s. Story words arrive at ~2-3 words/second. You need to:
+
+1. Create a word-rate time series of hidden states
+2. Downsample to TR rate using Lanczos interpolation
+3. Convolve with hemodynamic response function
+4. Apply FIR delays [1, 2, 3, 4] TRs to capture sluggish BOLD response
+
+```python
+from scipy.signal import resample
+from nilearn.glm.first_level import compute_regressor
+
+def align_features_to_bold(
+    word_features: np.ndarray,    # (n_words, n_layers, hidden_dim)
+    word_times: np.ndarray,        # (n_words,) onset times in seconds
+    tr: float,                     # repetition time, e.g. 1.5
+    n_trs: int,                    # total TRs in BOLD run
+    delays: list = [1, 2, 3, 4]   # FIR delays in TRs
+) -> np.ndarray:
+    """
+    Returns shape: (n_trs, n_delays, n_layers, hidden_dim)
+    """
+    # Use HuthLab's lanczos_interp utility
+    # or implement: interpolate word features onto TR grid
+    # then convolve with canonical HRF
+    # then create delay matrix
+    pass
+    # See: encoding-model-scaling-laws/src/features.py
+```
+
+Use the HuthLab repo's existing implementation. Do not reimplement Lanczos from scratch.
+
+---
+
+**Step 5: Banded ridge regression**
+
+This is where the weight matrix is actually learned. Banded ridge assigns separate regularization hyperparameters to each feature band (each layer group), which is critical because different LLaMA layers have different signal-to-noise ratios.
+
+```python
+# HuthLab repo has this implemented
+# Key call is roughly:
+from ridge_utils.ridge import banded_ridge_regression
+
+# X shape: (n_trs × n_subjects, n_features)
+# where n_features = n_delays × n_layers × hidden_dim
+# compressed via PCA first to ~500-1000 components
+
+# Y shape: (n_trs × n_subjects, n_voxels)
+# where n_voxels = ~70,000 cortical voxels
+
+weights, alphas = banded_ridge_regression(
+    X_train, Y_train,
+    bands=layer_bands,      # which features belong to which band
+    alphas=np.logspace(1, 20, 20),
+    n_iter=100,
+    progress=True
+)
+# weights shape: (n_features, n_voxels)
+# This is your weight matrix. Save it.
+```
+
+PCA compress X before regression — going from (4 delays × 7 layers × 4096) = 114,688 features down to 500-1000 components is necessary for computational tractability. Save the PCA object alongside the weights — you'll need it at inference time.
+
+---
+
+**Step 6: Evaluate on held-out data**
+
+```python
+def evaluate_encoding_model(weights, pca, X_test, Y_test):
+    """
+    Compute per-voxel correlation between predicted and actual BOLD.
+    Expected: r ~ 0.20-0.35 in language regions
+              r ~ 0.10-0.20 in association cortex
+              r < 0.05 in primary visual/motor (sanity check)
+    """
+    X_pca = pca.transform(X_test)
+    Y_pred = X_pca @ weights
+    
+    correlations = np.array([
+        np.corrcoef(Y_pred[:, v], Y_test[:, v])[0,1]
+        for v in range(Y_test.shape[1])
+    ])
+    
+    print(f"Mean r: {correlations.mean():.3f}")
+    print(f"Language cortex r: {correlations[language_mask].mean():.3f}")
+    print(f"NAcc r: {correlations[nacc_mask].mean():.3f}")
+    
+    return correlations
+```
+
+Voxels with r < 0.05 should be masked out before Schaefer aggregation — they're noise. Keep only well-predicted voxels in each ROI.
+
+---
+
+**Step 7: Schaefer atlas aggregation and ROI definition**
+
+```python
+import nilearn.datasets as datasets
+from nilearn.image import resample_to_img
+
+# Download Schaefer 1000-parcel atlas
+schaefer = datasets.fetch_atlas_schaefer_2018(n_rois=1000)
+
+# For each parcel, mean activation across constituent voxels
+def voxels_to_schaefer(voxel_activations, schaefer_atlas):
+    # voxel_activations: (n_voxels,)
+    # returns: (1000,)
+    parcel_activations = np.zeros(1000)
+    for parcel_id in range(1, 1001):
+        mask = schaefer_atlas == parcel_id
+        parcel_activations[parcel_id-1] = voxel_activations[mask].mean()
+    return parcel_activations
+
+# Define functional ROI groups from Schaefer labels
+# Schaefer parcels have network labels (Vis, SomMot, DorsAttn, 
+# SalVentAttn, Limbic, Cont, Default)
+# Plus anatomical labels for subcortical (NAcc not in cortical atlas —
+# use separate subcortical mask for NAcc/striatum)
+
+ROI_NETWORKS = {
+    'default_mode': 'Default',
+    'frontoparietal': 'Cont',     # executive function / dlPFC
+    'salience': 'SalVentAttn',    # anterior insula / dACC
+    'dorsal_attention': 'DorsAttn',
+    'limbic': 'Limbic',           # vmPFC / OFC
+    'language': ['LH_Default_PFCv', 'LH_Default_Temp',  # approximate
+                 'RH_Default_PFCv', 'RH_Default_Temp'],
+}
+
+# NAcc is subcortical — use MNI coordinates from PNAS paper:
+# Talairach: x=±10, y=+12, z=-2
+# Convert to MNI and create sphere mask
+NACC_MNI = {'L': [-10, 12, -2], 'R': [10, 12, -2]}
+```
+
+---
+
+**Step 8: Save everything needed for inference**
+
+```python
+import pickle
+import numpy as np
+
+inference_package = {
+    'weights': weights,              # (n_pca_components, n_voxels)
+    'pca': pca,                      # fitted PCA object
+    'voxel_mask': r_mask,            # bool mask of well-predicted voxels
+    'schaefer_labels': parcel_labels, # voxel → parcel mapping
+    'roi_definitions': ROI_NETWORKS, # parcel → ROI mapping
+    'nacc_mask': nacc_mask,          # subcortical NAcc mask
+    'layer_indices': list(range(16, 23)),  # which LLaMA layers
+    'delays': [1, 2, 3, 4],         # FIR delays used
+    'tr': 1.5,                       # TR of training data
+    'model_name': 'meta-llama/Meta-Llama-3-8B',
+    'correlation_map': correlations, # per-voxel r values for QC
+}
+
+with open('encoding_model_inference_package.pkl', 'wb') as f:
+    pickle.dump(inference_package, f)
+
+print("Saved. Package ready for Reddit inference pipeline.")
+```
+
+---
+
+**Inference sketch (for reference — full build is next session)**
+
+```python
+def comment_to_roi_features(comment: str, package: dict) -> dict:
+    """
+    Full inference pipeline for a single Reddit comment.
+    Returns dict of ROI activation estimates.
+    """
+    # 1. Extract LLaMA hidden states
+    hidden = extract_hidden_states(
+        comment,
+        layers=package['layer_indices']
+    )  # (n_tokens, n_layers, 4096)
+    
+    # 2. Mean pool (document level — no TR alignment needed at inference)
+    pooled = hidden.mean(axis=0).flatten()  # (n_layers × 4096,)
+    
+    # 3. Apply delays (repeat with shift for static text)
+    delayed = np.stack([pooled] * len(package['delays']), axis=0).flatten()
+    
+    # 4. PCA + weight matrix
+    pca_features = package['pca'].transform(delayed.reshape(1, -1))
+    voxel_pred = pca_features @ package['weights']  # (1, n_voxels)
+    
+    # 5. Mask to well-predicted voxels
+    voxel_pred = voxel_pred[0, package['voxel_mask']]
+    
+    # 6. Aggregate to ROIs
+    roi_features = aggregate_to_rois(voxel_pred, package)
+    
+    return roi_features
+    # {'nacc': 0.23, 'dlpfc': 0.41, 'dme': 0.12, ...}
+```
+
+---
+
+**Known issues to handle**
+
+LLaMA access: requires HuggingFace account and model access approval at meta-llama/Meta-Llama-3-8B. Apply at llama.meta.com if not already approved. GPT-2 XL works as a prototype substitute with no gating.
+
+Memory: LLaMA 3 8B in float16 = ~16GB VRAM. Use 4-bit quantization (bitsandbytes) if GPU VRAM < 16GB. On Mac use llama.cpp with GGUF format.
+
+Narratives BOLD shape: some stories have different TRs or preprocessing. Check each story's JSON sidecar before assuming uniform TR.
+
+NAcc not in Schaefer cortical atlas: Schaefer covers cortex only. Use a separate subcortical parcellation (Melbourne Subcortex Atlas or FSL's subcortical atlas) or define NAcc as a sphere ROI from the PNAS paper's coordinates.
+
+Cross-subject alignment: the weight matrix should ideally be trained per-subject then averaged, or trained on concatenated data. The HuthLab repo uses concatenated data across subjects — follow their approach.
+
+---
+
+**Success criteria before moving to inference**
+
+- Mean whole-brain encoding r > 0.10
+- Language cortex r > 0.20
+- NAcc r > 0.05 (subcortical is harder to predict)
+- Weight matrix saved with PCA and all metadata
+- Single comment inference runs end-to-end and returns 20 ROI values
+- Inference time < 500ms per comment on GPU
+
+---
+
+**Repos to read before writing any code**
+- https://github.com/HuthLab/encoding-model-scaling-laws (primary)
+- https://github.com/HuthLab/deep-fMRI-dataset (data utilities)
+- https://github.com/csinva/interpretable-embeddings (QA-Emb, optional extension)
