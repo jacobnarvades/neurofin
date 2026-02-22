@@ -40,6 +40,12 @@ aws s3 sync --no-sign-request \
   s3://openneuro.org/ds003020/derivative/TextGrids \
   "$DATA_ROOT/derivative/TextGrids"
 
+for SUBJ in UTS02 UTS03 UTS04 UTS05 UTS06 UTS07 UTS08; do
+  aws s3 sync --no-sign-request \
+    s3://openneuro.org/ds003020/derivative/preprocessed_data/$SUBJ \
+    "$DATA_ROOT/derivative/preprocessed_data/$SUBJ"
+done
+
 python - <<'PY'
 from pathlib import Path
 hf5 = list(Path("ds003020/derivative/preprocessed_data/UTS01").glob("*.hf5"))
@@ -52,17 +58,49 @@ PY
 
 PYTHONPATH=src ./.venv/bin/python -m neurofin.train --data-root "$DATA_ROOT" --dry-split --subjects UTS01
 
-CMD="cd $WORKDIR && source .venv/bin/activate && \
-PYTHONPATH=src python -m neurofin.train \
-  --data-root $DATA_ROOT \
-  --output-dir $OUT_DIR \
-  --subjects UTS01 \
-  --context-tokens 256 \
-  --n-test-stories 4 \
-  --feature-cache-dir $CACHE_DIR \
-  --batch-size 16 2>&1 | tee $LOG_DIR/train_uts01.log"
+# Write full training sequence to a script for tmux.
+# Variables expanded here (paths hardcoded); \${SUBJ} left for the loop in the generated script.
+cat > "$WORKDIR/run_all_training.sh" <<TRAINEOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $WORKDIR
+source .venv/bin/activate
 
-tmux new-session -d -s "$SESSION_NAME" "$CMD"
+# ---- Phase 1: UTS01 ----
+PYTHONPATH=src python -m neurofin.train \\
+  --data-root $DATA_ROOT \\
+  --output-dir $OUT_DIR \\
+  --subjects UTS01 \\
+  --context-tokens 256 \\
+  --n-test-stories 4 \\
+  --feature-cache-dir $CACHE_DIR \\
+  --batch-size 16 2>&1 | tee $LOG_DIR/train_uts01.log
+
+# ---- Validation gate ----
+python - <<'PY'
+import json, sys
+m = json.load(open("$OUT_DIR/training_metrics.json"))
+r = m.get("mean_corr", 0)
+print(f"UTS01 mean_corr: {r:.4f}")
+if r < 0.15:
+    sys.exit("mean_corr below threshold 0.15 — stopping before multi-subject training.")
+PY
+
+# ---- Phase 2: UTS02-UTS08 (cache hits — ridge only) ----
+for SUBJ in UTS02 UTS03 UTS04 UTS05 UTS06 UTS07 UTS08; do
+  PYTHONPATH=src python -m neurofin.train \\
+    --data-root $DATA_ROOT \\
+    --output-dir $WORKDIR/artifacts_\${SUBJ} \\
+    --subjects \${SUBJ} \\
+    --context-tokens 256 \\
+    --n-test-stories 4 \\
+    --feature-cache-dir $CACHE_DIR \\
+    --batch-size 16 2>&1 | tee $LOG_DIR/train_\${SUBJ}.log
+done
+TRAINEOF
+
+chmod +x "$WORKDIR/run_all_training.sh"
+tmux new-session -d -s "$SESSION_NAME" "bash $WORKDIR/run_all_training.sh"
 
 echo "Started tmux session: $SESSION_NAME"
 echo "Attach: tmux attach -t $SESSION_NAME"
