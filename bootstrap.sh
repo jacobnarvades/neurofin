@@ -56,12 +56,11 @@ CMD="cd $WORKDIR && source .venv/bin/activate && \
 PYTHONPATH=src python -m neurofin.train \
   --data-root $DATA_ROOT \
   --output-dir $OUT_DIR \
-  --use-4bit \
   --subjects UTS01 \
   --context-tokens 256 \
   --n-test-stories 4 \
   --feature-cache-dir $CACHE_DIR \
-  --batch-size 32 2>&1 | tee $LOG_DIR/train_uts01.log"
+  --batch-size 16 2>&1 | tee $LOG_DIR/train_uts01.log"
 
 tmux new-session -d -s "$SESSION_NAME" "$CMD"
 
