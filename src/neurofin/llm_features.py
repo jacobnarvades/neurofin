@@ -20,18 +20,23 @@ class LLMFeatureExtractor:
 
     def __post_init__(self) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        quantization_config = None
-        model_kwargs: dict = {
+        self._model_kwargs: dict = {
             "output_hidden_states": True,
             "trust_remote_code": False,
         }
         if self.use_4bit and self.device.startswith("cuda"):
-            quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-            model_kwargs["quantization_config"] = quantization_config
-            model_kwargs["device_map"] = "auto"
+            self._model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+            self._model_kwargs["device_map"] = "auto"
         else:
-            model_kwargs["torch_dtype"] = torch.float16 if self.device.startswith("cuda") else torch.float32
-        self.model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+            self._model_kwargs["torch_dtype"] = torch.float16 if self.device.startswith("cuda") else torch.float32
+        self.model = None  # lazy — loaded on first extract_word_features call
+
+    def _ensure_model_loaded(self) -> None:
+        if self.model is not None:
+            return
+        import sys
+        print("Loading LLM weights into GPU...", flush=True, file=sys.stderr)
+        self.model = AutoModel.from_pretrained(self.model_name, **self._model_kwargs)
         self.model.eval()
         if not self.use_4bit:
             self.model.to(self.device)
@@ -40,6 +45,7 @@ class LLMFeatureExtractor:
         """
         Returns array with shape (n_words, n_layers, hidden_dim).
         """
+        self._ensure_model_loaded()
         if not words:
             return np.empty((0, len(self.layer_indices), self.model.config.hidden_size), dtype=np.float32)
 
