@@ -46,6 +46,14 @@ for SUBJ in UTS02 UTS03 UTS04 UTS05 UTS06 UTS07 UTS08; do
     "$DATA_ROOT/derivative/preprocessed_data/$SUBJ"
 done
 
+# Download pycortex-db transforms for all subjects (contains mask_thick.nii.gz
+# needed for flat .hf5 voxel -> Schaefer parcel mapping during ROI aggregation).
+for SUBJ in UTS01 UTS02 UTS03 UTS04 UTS05 UTS06 UTS07 UTS08; do
+  aws s3 sync --no-sign-request \
+    s3://openneuro.org/ds003020/derivative/pycortex-db/$SUBJ/transforms \
+    "$DATA_ROOT/derivative/pycortex-db/$SUBJ/transforms"
+done
+
 python - <<'PY'
 from pathlib import Path
 hf5 = list(Path("ds003020/derivative/preprocessed_data/UTS01").glob("*.hf5"))
