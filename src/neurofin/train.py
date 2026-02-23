@@ -371,13 +371,23 @@ def feature_cache_path(cache_dir: Path, cache_key: dict) -> Path:
 
 
 def load_cached_word_features(cache_path: Path, cache_key: dict, n_words: int) -> np.ndarray | None:
-    if not cache_path.exists():
+    # LLM features depend only on text, not on which subject heard it.
+    # If the subject-specific file doesn't exist, scan for any subject's
+    # cache for the same story/model/context so all subjects share UTS01's
+    # already-extracted features without re-running the LLM.
+    path = cache_path
+    if not path.exists():
+        path = _find_cross_subject_cache(cache_path.parent, cache_key) or cache_path
+    if not path.exists():
         return None
     try:
-        with cache_path.open("rb") as f:
+        with path.open("rb") as f:
             payload = pickle.load(f)
-        if payload.get("key") != cache_key:
-            return None
+        # Validate subject-invariant fields only.
+        stored = payload.get("key", {})
+        for field in ("story_id", "context_tokens", "layer_indices", "model_name"):
+            if stored.get(field) != cache_key.get(field):
+                return None
         if int(payload.get("n_words", -1)) != int(n_words):
             return None
         arr = np.asarray(payload["word_features"], dtype=np.float32)
@@ -386,6 +396,14 @@ def load_cached_word_features(cache_path: Path, cache_key: dict, n_words: int) -
         return arr
     except Exception:
         return None
+
+
+def _find_cross_subject_cache(cache_dir: Path, cache_key: dict) -> Path | None:
+    """Return any subject's cache file for the same story and model params."""
+    story = cache_key["story_id"]
+    for candidate in cache_dir.glob(f"*__{story}__*.pkl"):
+        return candidate
+    return None
 
 
 def save_cached_word_features(cache_path: Path, cache_key: dict, word_features: np.ndarray, n_words: int) -> None:
