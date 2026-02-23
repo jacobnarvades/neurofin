@@ -34,8 +34,13 @@ def align_features_to_tr(
         interpolation_method=interpolation_method,
         lanczos_window=lanczos_window,
     )
-    hrf_convolved = _convolve_with_spm_hrf(interpolated, tr)
-    delayed = _apply_fir_delays(hrf_convolved, delays)
+    # FIR delay stacking models the HRF implicitly: ridge learns the optimal
+    # linear combination of lagged features per voxel (Huth et al. 2016).
+    # Do NOT also convolve with an explicit HRF — that would make all four
+    # delay channels nearly identical (HRF spans ~10–15 TRs, so a 1–4 TR
+    # shift barely changes the signal), producing an ill-conditioned feature
+    # matrix that drives ridge to select maximum alpha → weights → 0.
+    delayed = _apply_fir_delays(interpolated, delays)
     return delayed
 
 
