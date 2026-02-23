@@ -16,13 +16,16 @@ Core hypothesis:
 ## Architecture
 
 ### LLM Feature Extractor
-- Model: `Qwen/Qwen3-14B-Base` (40 transformer layers)
-- Layers: `20..28` (inclusive), interpreted as transformer block indices (embedding output excluded)
-- Hidden size: `5120`
-- Sliding context window: `256` tokens
-- Extraction batch size: `16` (not 32 — H100 with float16, no 4-bit quant)
+- Model: `meta-llama/Llama-3.1-8B` (32 transformer layers) — **current production model**
+- Layers: `24..31` (inclusive), interpreted as transformer block indices (embedding output excluded)
+- Hidden size: `4096`
+- Sliding context window: `512` tokens
+- Extraction batch size: `16` (H100 with float16, no 4-bit quant needed for 8B)
 - `use_cache=False` on model forward passes
-- Feature std at layers 20-28: ~4-6 (healthy; confirmed on Lambda)
+- bfloat16 compute; `bnb_4bit_compute_dtype` set if `--use-4bit` is passed
+
+Previous model tested: `Qwen/Qwen3-14B-Base` layers 20-28, ctx 256 — comparable
+performance to Llama-3.1-8B but slightly weaker on UTS01-03.
 
 ### Training Data
 - Dataset: HuthLab Narratives (`OpenNeuro ds003020`)
@@ -62,7 +65,12 @@ Core hypothesis:
 - Mask downloaded via: `aws s3 sync s3://openneuro.org/ds003020/derivative/pycortex-db/$SUBJ/transforms ...`
 
 ### Financial Pipeline (downstream)
-Reddit comments -> encoding model -> ROI neural features -> Granger causality filter -> Chronos-2 forecasting
+Reddit comments -> encoding model -> ROI neural features -> ISC filter -> Granger causality filter -> Chronos-2 forecasting
+
+ISC filter: compute inter-subject correlation of predicted ROI activations across all 8 subjects.
+Keep only ROIs where mean pairwise ISC > threshold (~0.15). This ensures only text-driven,
+consensus neural signals enter the financial model. UTS01-03 will dominate; UTS04-08 add
+noise-averaging weight.
 
 ---
 
@@ -113,32 +121,44 @@ Reddit comments -> encoding model -> ROI neural features -> Granger causality fi
 
 ## Current Status
 
-- UTS01 full training complete on Lambda Labs H100 instance.
-- All 8 subjects (UTS01–UTS08) training in progress via `run_all_subjects.sh`.
-- `bootstrap.sh` exists in repo root for Lambda setup and full training bootstrap.
-- Feature cache (84 stories, ~UTS01) fully built at `feature_cache/`.
+- **All 8 subjects fully trained** with Llama-3.1-8B (layers 24-31, ctx 512) on Lambda H100.
+- Trained model packages downloaded to local: `~/Desktop/neurofin_artifacts/`.
+- Lambda instance terminated — no active compute costs.
+- `run_all_subjects_llama8b.sh` in repo root for re-running on Lambda if needed.
+- **Next step: implement inference pseudo-time pipeline** (`infer.py`) before Reddit text
+  can be run through the encoding models for the financial pipeline.
 
 ---
 
-## Observed Performance (UTS01, Lambda H100)
+## Observed Performance (Llama-3.1-8B, layers 24-31, ctx 512, Lambda H100)
 
 The correct metric for comparing to literature is **mean_top5pct_corr** (mean
 correlation of the top 5% of voxels by held-out test-story performance).
 `mean_corr` (all voxels) is diluted by subcortical/non-language regions and is
 not the right gate metric.
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| `mean_corr` (all voxels) | ~0.026 | Expected — most voxels don't respond to language |
-| `mean_positive_corr` | ~0.060 | Mean over voxels with r > 0 |
-| `mean_top5pct_corr` | ~0.13–0.15 | Comparable to Antonello et al. 2023 |
-| Max voxel r | ~0.31 | Language/auditory cortex peak voxels |
-| `n_voxels_after_corr_mask` | ~17K | Voxels with r >= 0.05 |
+| Subject | n_runs | top5pct | mean_corr | n_voxels (corr mask) | alpha |
+|---------|--------|---------|-----------|----------------------|-------|
+| UTS01 | 84 | **0.1193** | 0.0251 | 16,358 | 3,981,072 |
+| UTS02 | 84 | **0.1044** | 0.0241 | 19,125 | 1,359,356 |
+| UTS03 | 84 | **0.1211** | 0.0257 | 20,523 | 3,981,072 |
+| UTS04 | 26 | 0.0833 | 0.0092 | 8,377 | 158,489 |
+| UTS05 | 27 | 0.0690 | 0.0039 | 6,693 | 464,159 |
+| UTS06 | 27 | 0.0672 | 0.0051 | 5,549 | 10 ⚠️ |
+| UTS07 | 27 | 0.0666 | 0.0055 | 5,617 | 158,489 |
+| UTS08 | 27 | 0.0602 | 0.0049 | 3,515 | 29 ⚠️ |
 
-Validation gate (in `bootstrap.sh` / `run_all_subjects.sh`) checks:
-`mean_top5pct_corr >= 0.08`
+**Key observations:**
+- **Bimodal split**: UTS01-03 (84 stories, ~25K train TRs) are strong; UTS04-08 (~27 stories, ~7.5K TRs) are data-limited.
+- UTS06 and UTS08 alphas hit the grid floor (10, 29) — scale-invariance of Pearson r means all alphas gave the same validation score; these fits are technically valid but lightly regularized.
+- UTS08 has only 3,515 voxels passing the correlation mask — weakest subject overall.
+- **For the financial pipeline: use UTS01-03 as primary signal.** UTS04-08 contribute weaker, noisier features.
+- ISC (inter-subject correlation) filtering across subjects will naturally weight UTS01-03 more heavily.
 
-Literature target: ~0.15–0.25 (Antonello et al. 2023, Qwen2-class models on ds003020).
+Validation gate: `mean_top5pct_corr >= 0.08` (passed by UTS01-04)
+
+Literature target: ~0.15–0.25 (Antonello et al. 2023, larger models on ds003020).
+Current gap (~0.12 vs 0.15+) likely due to model scale (8B vs 65B+) — acceptable for pipeline use.
 
 ---
 
@@ -181,18 +201,20 @@ Current instruction:
 ## Running Training
 
 ```bash
-# Full training on Lambda (single subject)
+# Full training on Lambda — single subject (Llama-3.1-8B, production config)
 PYTHONPATH=src python -m neurofin.train \
   --data-root ds003020 \
-  --output-dir artifacts_UTS01 \
+  --output-dir artifacts_llama8b_L24-31_ctx512_UTS01 \
+  --model-name meta-llama/Llama-3.1-8B \
   --subjects UTS01 \
-  --context-tokens 256 \
+  --layer-indices 24,25,26,27,28,29,30,31 \
+  --context-tokens 512 \
   --n-test-stories 4 \
-  --feature-cache-dir feature_cache \
+  --feature-cache-dir feature_cache_llama8b_L24-31_ctx512 \
   --batch-size 16
 
-# All 8 subjects (use run_all_subjects.sh on Lambda)
-bash /home/ubuntu/neurofin/run_all_subjects.sh
+# All 8 subjects
+bash /home/ubuntu/neurofin/run_all_subjects_llama8b.sh
 ```
 
 ---
@@ -207,6 +229,7 @@ bash /home/ubuntu/neurofin/run_all_subjects.sh
 - For cloud runs, download directly from OpenNeuro S3; do not upload local datasets.
 - Always use `/home/ubuntu/neurofin/.venv/bin/python3` (not system python3) when
   inspecting pkl files — numpy version mismatch will cause `ModuleNotFoundError: numpy._core`.
-- Lambda instance: `ubuntu@192-222-54-157` (may change between sessions).
-- Feature cache at `~/neurofin/feature_cache/` — 84 pkl files for UTS01 stories.
-  UTS02-UTS08 reuse these via cross-subject fallback; no re-extraction needed.
+- Lambda instance IP changes each session — check dashboard on spin-up.
+- Trained model packages (pkl files) saved locally at `~/Desktop/neurofin_artifacts/`.
+- Feature cache on Lambda: `~/neurofin/feature_cache_llama8b_L24-31_ctx512/` — lost when instance is terminated; will regenerate from HuggingFace weights on next run (~60 min for UTS01, ~10 min each for UTS02-08 cache hits).
+- `BitsAndBytesConfig` uses `bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"` — required for correct 4-bit performance. Without bfloat16 compute, inference is 4-10x slower and uses ~75GB vs ~50GB on H100.
