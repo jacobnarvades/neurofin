@@ -25,7 +25,11 @@ class LLMFeatureExtractor:
             "trust_remote_code": False,
         }
         if self.use_4bit and self.device.startswith("cuda"):
-            self._model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+            self._model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+            )
             self._model_kwargs["device_map"] = "auto"
         else:
             self._model_kwargs["torch_dtype"] = torch.float16 if self.device.startswith("cuda") else torch.float32
