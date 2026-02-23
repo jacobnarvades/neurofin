@@ -306,9 +306,11 @@ def zscore_run_per_voxel(y_run: np.ndarray, eps: float) -> tuple[np.ndarray, np.
     z = (y_run - mean) / std_safe
 
     if np.any(nonconstant):
-        if not np.allclose(z[:, nonconstant].mean(axis=0), 0.0, atol=1e-3):
+        # Use float64 for sanity check to avoid float32 rounding drift.
+        z64 = z[:, nonconstant].astype(np.float64)
+        if not np.allclose(z64.mean(axis=0), 0.0, atol=1e-4):
             raise RuntimeError("Per-run z-scoring mean check failed.")
-        if not np.allclose(z[:, nonconstant].std(axis=0), 1.0, atol=1e-2):
+        if not np.allclose(z64.std(axis=0), 1.0, atol=1e-2):
             raise RuntimeError("Per-run z-scoring std check failed.")
     return z.astype(np.float32), nonconstant
 
