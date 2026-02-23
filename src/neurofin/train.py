@@ -231,7 +231,8 @@ def main() -> None:
 
     package = {
         "weights": model.weights,
-        "pca": model.pca,
+        "scaler": model.scaler,
+        "pca": model.pca,  # alias kept for backward compat
         "voxel_mask_after_var": nonconstant_mask_flat,
         "voxel_mask_after_corr": keep_voxels,
         "spatial_shape": spatial_shape,

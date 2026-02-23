@@ -8,14 +8,40 @@ from sklearn.linear_model import Ridge
 
 
 @dataclass
-class EncodingModel:
+class PCAScaler:
+    """PCA + per-component z-score normalizer fitted on training data."""
+
     pca: PCA
+    pc_mean: np.ndarray   # (n_components,)
+    pc_std: np.ndarray    # (n_components,)  — zero-variance PCs clamped to 1
+
+    def fit_transform(self, x: np.ndarray) -> np.ndarray:
+        z = self.pca.fit_transform(x)
+        self.pc_mean = z.mean(axis=0)
+        self.pc_std = z.std(axis=0)
+        self.pc_std[self.pc_std < 1e-9] = 1.0
+        return (z - self.pc_mean) / self.pc_std
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        z = self.pca.transform(x)
+        return (z - self.pc_mean) / self.pc_std
+
+
+@dataclass
+class EncodingModel:
+    scaler: PCAScaler
     weights: np.ndarray
     alpha: float | None = None
 
+    # Keep pca as an alias for backward compat with saved packages that
+    # reference it directly.
+    @property
+    def pca(self) -> PCA:
+        return self.scaler.pca
+
     def predict(self, x: np.ndarray) -> np.ndarray:
-        x_pca = self.pca.transform(x)
-        return x_pca @ self.weights
+        x_scaled = self.scaler.transform(x)
+        return x_scaled @ self.weights
 
 
 def fit_encoding_model(
@@ -24,13 +50,17 @@ def fit_encoding_model(
     pca_components: int,
     alpha: float,
 ) -> EncodingModel:
-    pca = PCA(n_components=pca_components, svd_solver="randomized", random_state=42)
-    x_train_pca = pca.fit_transform(x_train)
+    scaler = PCAScaler(
+        pca=PCA(n_components=pca_components, svd_solver="randomized", random_state=42),
+        pc_mean=np.zeros(pca_components, dtype=np.float32),
+        pc_std=np.ones(pca_components, dtype=np.float32),
+    )
+    x_train_scaled = scaler.fit_transform(x_train)
     ridge = Ridge(alpha=float(alpha), fit_intercept=False)
-    ridge.fit(x_train_pca, y_train)
+    ridge.fit(x_train_scaled, y_train)
     # sklearn stores coef as (n_targets, n_features)
     weights = ridge.coef_.T.astype(np.float32)
-    return EncodingModel(pca=pca, weights=weights, alpha=float(alpha))
+    return EncodingModel(scaler=scaler, weights=weights, alpha=float(alpha))
 
 
 def select_alpha_with_validation_story(
@@ -45,9 +75,13 @@ def select_alpha_with_validation_story(
     Select alpha by fitting on train-core and scoring on held-out validation story.
     Scores are mean voxelwise Pearson r on the validation story.
     """
-    pca = PCA(n_components=pca_components, svd_solver="randomized", random_state=42)
-    x_train_core_pca = pca.fit_transform(x_train_core)
-    x_val_story_pca = pca.transform(x_val_story)
+    scaler = PCAScaler(
+        pca=PCA(n_components=pca_components, svd_solver="randomized", random_state=42),
+        pc_mean=np.zeros(pca_components, dtype=np.float32),
+        pc_std=np.ones(pca_components, dtype=np.float32),
+    )
+    x_train_core_scaled = scaler.fit_transform(x_train_core)
+    x_val_story_scaled = scaler.transform(x_val_story)
 
     scores: dict[float, float] = {}
     best_alpha = float(alpha_grid[0])
@@ -55,8 +89,8 @@ def select_alpha_with_validation_story(
 
     for alpha in alpha_grid:
         ridge = Ridge(alpha=float(alpha), fit_intercept=False)
-        ridge.fit(x_train_core_pca, y_train_core)
-        y_val_pred = ridge.predict(x_val_story_pca)
+        ridge.fit(x_train_core_scaled, y_train_core)
+        y_val_pred = ridge.predict(x_val_story_scaled)
         val_corr = voxelwise_correlation(y_val_pred, y_val_story)
         score = float(np.mean(val_corr))
         scores[float(alpha)] = score
