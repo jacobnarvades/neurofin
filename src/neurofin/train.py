@@ -113,7 +113,7 @@ def main() -> None:
     )
 
     story_blocks: dict[str, list[tuple[np.ndarray, np.ndarray]]] = defaultdict(list)
-    story_order: list[str] = []
+    story_order_loaded: list[str] = []
     nonconstant_mask_flat: np.ndarray | None = None
     spatial_shape: tuple[int, int, int] | None = None
 
@@ -165,7 +165,7 @@ def main() -> None:
         n = min(x_run.shape[0], y_run_z.shape[0])
         story_id = run.task
         if story_id not in story_blocks:
-            story_order.append(story_id)
+            story_order_loaded.append(story_id)
         story_blocks[story_id].append((x_run[:n].astype(np.float32), y_run_z[:n].astype(np.float32)))
 
     if not story_blocks:
@@ -180,7 +180,7 @@ def main() -> None:
         story_blocks[story_id] = updated
 
     train_story_ids, val_story_id, test_story_ids = compute_story_splits(
-        story_order=story_order,
+        story_order=story_order_loaded,
         test_stories_arg=args.test_stories,
         n_test_stories=args.n_test_stories,
     )
@@ -253,7 +253,7 @@ def main() -> None:
         "roi_definitions": atlas.roi_definitions,
         "layer_indices": cfg.layer_indices,
         "delays": cfg.delays,
-        "tr": float(cfg.target_tr),
+        "tr": float(runs[0].tr) if runs else float(cfg.target_tr),
         "sentence_rate_hz": float(cfg.sentence_rate_hz),
         "interpolation_method": cfg.interpolation_method,
         "hrf_model": cfg.hrf_model,
