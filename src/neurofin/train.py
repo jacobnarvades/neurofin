@@ -261,6 +261,10 @@ def main() -> None:
     with out_pkl.open("wb") as f:
         pickle.dump(package, f)
 
+    mean_positive_corr = float(corr[corr > 0].mean()) if (corr > 0).any() else 0.0
+    top5_thresh = float(np.percentile(corr, 95))
+    mean_top5pct_corr = float(corr[corr >= top5_thresh].mean())
+
     metrics = {
         "n_runs": len(runs),
         "n_train_trs": int(x_train_all.shape[0]),
@@ -269,6 +273,8 @@ def main() -> None:
         "n_voxels_after_variance_mask": int(nonconstant_mask_flat.sum()),
         "n_voxels_after_corr_mask": int(keep_voxels.sum()),
         "mean_corr": float(corr.mean()),
+        "mean_positive_corr": mean_positive_corr,
+        "mean_top5pct_corr": mean_top5pct_corr,
         "alpha": None if model.alpha is None else float(model.alpha),
         "train_stories": train_story_ids,
         "validation_story": val_story_id,
@@ -279,7 +285,9 @@ def main() -> None:
         json.dump(metrics, f, indent=2)
 
     print(f"Saved package: {out_pkl}")
-    print(f"Mean voxelwise r: {metrics['mean_corr']:.4f}")
+    print(f"Mean voxelwise r (all): {metrics['mean_corr']:.4f}")
+    print(f"Mean voxelwise r (positive): {metrics['mean_positive_corr']:.4f}")
+    print(f"Mean voxelwise r (top 5%): {metrics['mean_top5pct_corr']:.4f}")
     print(f"Train stories: {train_story_ids}")
     print(f"Validation story: {val_story_id}")
     print(f"Test stories: {test_story_ids}")
