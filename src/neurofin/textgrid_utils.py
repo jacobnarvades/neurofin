@@ -42,11 +42,17 @@ def load_word_timings(textgrid_path: Path, tier_name: str | None = None) -> list
                 tmp_path = tmp.name
             tg = textgrid.openTextgrid(tmp_path, includeEmptyIntervals=False)
         except Exception:
-            msg = f"{original_error} [file: {textgrid_path}]"
-            raise TextgridStateError(msg) from original_error
+            pass
         finally:
             if tmp_path is not None:
                 Path(tmp_path).unlink(missing_ok=True)
+        # Final fallback: extract only the target tier via regex, bypassing
+        # cross-tier validation (handles overlaps in phones/other tiers).
+        try:
+            return _extract_words_tier_raw(textgrid_path, tier_name)
+        except Exception:
+            msg = f"{original_error} [file: {textgrid_path}]"
+            raise TextgridStateError(msg) from original_error
 
     names = tg.tierNames
     chosen_name = tier_name or _pick_word_tier(names)
@@ -118,6 +124,43 @@ def _repair_textgrid_interval_boundaries(textgrid_path: Path) -> str:
         out.append(f"{indent}{key} = {value:.6f}")
 
     return "\n".join(out) + "\n"
+
+
+def _extract_words_tier_raw(textgrid_path: Path, tier_name: str | None = None) -> list[WordTiming]:
+    """
+    Regex-based fallback for long-format TextGrids where praatio fails validation
+    (e.g. overlap in phones tier). Extracts only the target tier's intervals,
+    bypassing cross-tier validation entirely.
+    """
+    content = textgrid_path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+
+    # Split into item blocks on 'item [N]:' boundaries
+    blocks = re.split(r'\n\s*item\s*\[\d+\]\s*:', content)
+
+    tier_names: list[str] = []
+    for block in blocks[1:]:
+        m = re.search(r'name\s*=\s*"([^"]*)"', block)
+        tier_names.append(m.group(1) if m else "")
+
+    chosen = tier_name or _pick_word_tier([n for n in tier_names if n])
+
+    interval_re = re.compile(
+        r'xmin\s*=\s*([\d.eE+\-]+)\s+xmax\s*=\s*([\d.eE+\-]+)\s+text\s*=\s*"([^"]*)"',
+        re.DOTALL,
+    )
+
+    for block in blocks[1:]:
+        m = re.search(r'name\s*=\s*"([^"]*)"', block)
+        if not m or m.group(1) != chosen:
+            continue
+        words: list[WordTiming] = []
+        for im in interval_re.finditer(block):
+            text = im.group(3).strip()
+            if text:
+                words.append(WordTiming(word=text, start=float(im.group(1)), end=float(im.group(2))))
+        return words
+
+    raise RuntimeError(f"Could not find tier '{chosen}' in {textgrid_path}. Available: {tier_names}")
 
 
 def _load_chronological_textgrid(textgrid_path: Path, tier_name: str | None = None) -> list[WordTiming]:
