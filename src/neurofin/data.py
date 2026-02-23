@@ -55,13 +55,15 @@ def discover_story_runs(derivatives_root: Path, stimuli_root: Path) -> list[Stor
             if "data" not in f:
                 continue
             n_trs = int(f["data"].shape[0])
+            # Try to read TR from file metadata; fall back to ds003020 standard.
+            tr = _read_hf5_tr(f)
         runs.append(
             StoryRun(
                 subject=subject,
                 task=task,
                 bold_path=hf5_path,
                 textgrid_path=textgrid,
-                tr=1.5,
+                tr=tr,
                 n_trs=n_trs,
             )
         )
@@ -108,6 +110,25 @@ def _find_textgrid(stimuli_root: Path, task: str) -> Path | None:
         filtered = [c for c in candidates if task_lower in c.name.lower()]
         candidates = filtered if filtered else candidates
     return candidates[0] if candidates else None
+
+
+def _read_hf5_tr(f: "h5py.File") -> float:
+    """
+    Extract TR (repetition time in seconds) from an hf5 file.
+    ds003020 (HuthLab Natural Narratives) uses TR=2.0045s.
+    """
+    # Check common attribute names first.
+    for attr in ("tr", "TR", "repetition_time", "RepetitionTime"):
+        if attr in f.attrs:
+            return float(f.attrs[attr])
+    # Some hf5 files store a 'meta' dataset containing TR.
+    if "meta" in f:
+        meta = f["meta"]
+        for attr in ("tr", "TR", "repetition_time"):
+            if attr in meta.attrs:
+                return float(meta.attrs[attr])
+    # ds003020 standard TR (Huth et al. 2016 / Antonello et al. 2023).
+    return 2.0045
 
 
 def _extract_between(text: str, left: str, right: str) -> str:
