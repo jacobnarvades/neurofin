@@ -12,7 +12,6 @@ class TrainingConfig:
 
     model_name: str = "Qwen/Qwen3-14B-Base"
     layer_indices: list[int] = field(default_factory=lambda: list(range(20, 29)))
-    hidden_dim: int = 5120
     use_4bit: bool = False
     device: str = "cuda"
 

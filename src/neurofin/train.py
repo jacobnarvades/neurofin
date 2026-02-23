@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--subjects", type=str, default="", help="Comma-separated subject IDs, e.g. UTS01,UTS02")
     p.add_argument("--context-tokens", type=int, default=256, help="Sliding context window size in tokens.")
     p.add_argument("--batch-size", type=int, default=32, help="Sliding-window LLM batch size.")
+    p.add_argument(
+        "--layer-indices",
+        type=str,
+        default="",
+        help="Comma-separated layer indices, e.g. '40,41,42,...,55'. Overrides config default.",
+    )
     p.add_argument("--feature-cache-dir", type=Path, default=Path("feature_cache"))
     p.add_argument("--smoke-test", action="store_true", help="Integration-only mode; disables sliding context extraction.")
     p.add_argument("--n-test-stories", type=int, default=4)
@@ -46,6 +52,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    layer_indices_override = (
+        [int(x.strip()) for x in args.layer_indices.split(",") if x.strip()]
+        if args.layer_indices.strip()
+        else None
+    )
     cfg = TrainingConfig(
         data_root=args.data_root,
         output_dir=args.output_dir,
@@ -55,6 +66,8 @@ def main() -> None:
         pca_components=args.pca_components,
         context_tokens=args.context_tokens,
     )
+    if layer_indices_override is not None:
+        cfg.layer_indices = layer_indices_override
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     args.feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
