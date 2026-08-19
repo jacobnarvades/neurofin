@@ -1,4 +1,4 @@
-# Neurofin: Neural-Inspired Encoding Model Training
+# Neural-Inspired Encoding Model Training
 
 This repository implements the weight-matrix training stage described in `instructions.txt`:
 - Uses HuthLab Narratives (`ds003020`) for supervision.
